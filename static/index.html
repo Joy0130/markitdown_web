@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MarkItDown — 文件轉 Markdown</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
+<style>
+:root{
+  --ink:#0E1116; --panel:#151A21; --panel-2:#1A212A; --line:#242D3A;
+  --text:#DCE3EC; --muted:#7A879A; --accent:#58C7F3; --amber:#F2B45A; --red:#F2726F;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --display:"Space Grotesk",system-ui,sans-serif;
+  --sans:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+  --r:6px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+  font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased;
+}
+button,input,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- shell ---------- */
+.shell{display:flex;flex-direction:column;height:100dvh}
+header{
+  display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+  padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);
+}
+.brand{font-family:var(--display);font-weight:700;font-size:17px;letter-spacing:-.02em}
+.brand span{color:var(--accent)}
+.tag{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+header .spacer{flex:1}
+.limits{font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-height:0}
+.col{display:flex;flex-direction:column;min-height:0;min-width:0}
+.col.left{border-right:1px solid var(--line);background:var(--panel)}
+.colhead{
+  display:flex;align-items:center;gap:10px;padding:10px 16px;
+  border-bottom:1px solid var(--line);font-family:var(--mono);
+  font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)
+}
+.colhead .spacer{flex:1}
+
+/* ---------- drop ---------- */
+.dropwrap{padding:16px}
+.drop{
+  border:1px dashed var(--line);border-radius:var(--r);padding:26px 18px;text-align:center;
+  cursor:pointer;transition:border-color .15s,background .15s;background:var(--panel-2)
+}
+.drop:hover,.drop.over{border-color:var(--accent);background:#182430}
+.drop b{display:block;font-family:var(--display);font-size:15px;margin-bottom:4px}
+.drop small{color:var(--muted);font-family:var(--mono);font-size:11px}
+
+.urlrow{display:flex;gap:8px;padding:0 16px 14px}
+.urlrow input{
+  flex:1;min-width:0;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:var(--r);padding:8px 10px;font-family:var(--mono);font-size:12px
+}
+.urlrow input::placeholder{color:#55606f}
+
+/* ---------- file stack ---------- */
+.stack{flex:1;overflow:auto;padding:0 16px 16px;display:flex;flex-direction:column;gap:6px}
+.slab{
+  position:relative;display:flex;align-items:center;gap:10px;overflow:hidden;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:9px 10px;cursor:pointer;transition:border-color .15s
+}
+.slab:hover{border-color:#39485c}
+.slab[aria-selected="true"]{border-color:var(--accent);background:#16232e}
+.ext{
+  flex:none;width:46px;text-align:center;font-family:var(--mono);font-weight:700;
+  font-size:10px;letter-spacing:.06em;color:var(--accent);
+  border-right:1px solid var(--line);padding-right:8px
+}
+.slab.err .ext{color:var(--red)}
+.meta{flex:1;min-width:0}
+.meta b{display:block;font-weight:500;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.meta small{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.slab.err .meta small{color:var(--red)}
+.kill{
+  flex:none;background:none;border:0;color:var(--muted);cursor:pointer;
+  font-family:var(--mono);font-size:14px;padding:2px 4px;border-radius:4px
+}
+.kill:hover{color:var(--red)}
+/* 轉換中的掃描線 — 頁面的簽名動態 */
+.slab.busy::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(88,199,243,.16),transparent);
+  animation:scan 1.05s linear infinite
+}
+@keyframes scan{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+
+.actions{display:flex;gap:8px;padding:14px 16px;border-top:1px solid var(--line)}
+.btn{
+  flex:1;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+  border-radius:var(--r);padding:9px 12px;cursor:pointer;font-family:var(--mono);
+  font-size:12px;letter-spacing:.03em;transition:background .15s,border-color .15s
+}
+.btn:hover:not(:disabled){border-color:#3C4A5E;background:#1F2833}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#07131A;font-weight:700}
+.btn.primary:hover:not(:disabled){background:#7BD5F7;border-color:#7BD5F7}
+.btn.icon{flex:none;padding:6px 10px}
+
+/* ---------- output ---------- */
+.tabs{display:flex;gap:2px}
+.tab{
+  background:none;border:1px solid transparent;border-radius:4px;color:var(--muted);
+  padding:3px 10px;cursor:pointer;font-family:var(--mono);font-size:11px;letter-spacing:.06em
+}
+.tab[aria-pressed="true"]{color:var(--accent);border-color:var(--line);background:var(--panel-2)}
+.out{flex:1;overflow:auto;padding:22px 26px;min-height:0}
+pre.raw{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.md{max-width:74ch}
+.md h1,.md h2,.md h3,.md h4{font-family:var(--display);line-height:1.25;margin:1.4em 0 .5em}
+.md h1{font-size:24px;border-bottom:1px solid var(--line);padding-bottom:.3em}
+.md h2{font-size:19px}.md h3{font-size:16px}
+.md p,.md li{font-size:14px}
+.md code{font-family:var(--mono);font-size:12.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px}
+.md pre{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px;overflow:auto}
+.md pre code{background:none;padding:0}
+.md table{border-collapse:collapse;width:100%;font-size:13px;margin:1em 0}
+.md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+.md th{background:var(--panel-2)}
+.md blockquote{border-left:2px solid var(--accent);margin:1em 0;padding-left:14px;color:var(--muted)}
+.md img{max-width:100%}
+.md a{color:var(--accent)}
+.empty{height:100%;display:grid;place-content:center;text-align:center;color:var(--muted)}
+.empty p{font-family:var(--mono);font-size:12px;margin:6px 0 0}
+.empty b{font-family:var(--display);font-size:16px;color:var(--text)}
+
+.toast{
+  position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(120%);
+  background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:9px 16px;font-family:var(--mono);font-size:12px;transition:transform .22s;z-index:10
+}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.toast.bad{border-color:var(--red);color:var(--red)}
+
+@media (max-width:860px){
+  main{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  .col.left{border-right:0;border-bottom:1px solid var(--line)}
+  .stack{max-height:34dvh}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="brand">Mark<span>It</span>Down</div>
+    <div class="tag">文件 → Markdown</div>
+    <div class="spacer"></div>
+    <div class="limits" id="limits">載入中…</div>
+  </header>
+
+  <main>
+    <section class="col left">
+      <div class="colhead">來源<span class="spacer"></span><span id="count">0 個檔案</span></div>
+
+      <div class="dropwrap">
+        <div class="drop" id="drop" tabindex="0" role="button" aria-label="選擇或拖放檔案">
+          <b>拖放檔案，或點擊選擇</b>
+          <small id="exts">PDF · DOCX · PPTX · XLSX · HTML · 圖片 · 音訊</small>
+        </div>
+        <input type="file" id="picker" multiple hidden>
+      </div>
+
+      <div class="urlrow">
+        <input id="url" type="url" placeholder="https://… 直接轉換網頁" autocomplete="off">
+        <button class="btn icon" id="urlgo">抓取</button>
+      </div>
+
+      <div class="stack" id="stack"></div>
+
+      <div class="actions">
+        <button class="btn primary" id="convert" disabled>轉換</button>
+        <button class="btn" id="zip" disabled>下載 zip</button>
+        <button class="btn icon" id="clear" title="清空">清空</button>
+      </div>
+    </section>
+
+    <section class="col">
+      <div class="colhead">
+        <span id="outname">輸出</span>
+        <span class="spacer"></span>
+        <div class="tabs">
+          <button class="tab" id="tab-preview" aria-pressed="true">預覽</button>
+          <button class="tab" id="tab-raw" aria-pressed="false">原始碼</button>
+        </div>
+        <button class="btn icon" id="copy" disabled>複製</button>
+        <button class="btn icon" id="save" disabled>下載 .md</button>
+      </div>
+      <div class="out" id="out">
+        <div class="empty">
+          <b>還沒有內容</b>
+          <p>加入檔案後按「轉換」</p>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const els = {
+  drop:$('#drop'), picker:$('#picker'), stack:$('#stack'), count:$('#count'),
+  convert:$('#convert'), zip:$('#zip'), clear:$('#clear'), out:$('#out'),
+  outname:$('#outname'), copy:$('#copy'), save:$('#save'), toast:$('#toast'),
+  limits:$('#limits'), exts:$('#exts'), url:$('#url'), urlgo:$('#urlgo'),
+  tabPreview:$('#tab-preview'), tabRaw:$('#tab-raw'),
+};
+
+let items = [];          // {id, name, size, file?, url?, state, result}
+let activeId = null;
+let mode = 'preview';
+let seq = 0;
+
+/* ---------- helpers ---------- */
+const fmtSize = b => b >= 1048576 ? (b/1048576).toFixed(1)+' MB'
+                  : b >= 1024 ? Math.round(b/1024)+' KB' : b+' B';
+const extOf = n => (n.split('.').pop() || '???').slice(0,5).toUpperCase();
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let toastTimer;
+function toast(msg, bad=false){
+  els.toast.textContent = msg;
+  els.toast.classList.toggle('bad', bad);
+  els.toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2600);
+}
+
+/* ---------- state ---------- */
+function addFiles(list){
+  for (const f of list) items.push({ id:++seq, name:f.name, size:f.size, file:f, state:'idle', result:null });
+  render();
+}
+
+function render(){
+  els.count.textContent = `${items.length} 個檔案`;
+  els.stack.innerHTML = '';
+  for (const it of items){
+    const el = document.createElement('div');
+    el.className = 'slab' + (it.state==='busy' ? ' busy' : '') + (it.state==='error' ? ' err' : '');
+    el.setAttribute('aria-selected', String(it.id === activeId));
+    const note = it.state === 'error' ? it.result.error
+               : it.state === 'done'  ? `${it.result.chars.toLocaleString()} 字元`
+               : it.state === 'busy'  ? '轉換中…'
+               : fmtSize(it.size);
+    el.innerHTML =
+      `<span class="ext">${esc(extOf(it.name))}</span>` +
+      `<span class="meta"><b>${esc(it.name)}</b><small>${esc(note)}</small></span>` +
+      `<button class="kill" title="移除">✕</button>`;
+    el.addEventListener('click', e => {
+      if (e.target.closest('.kill')){
+        items = items.filter(x => x.id !== it.id);
+        if (activeId === it.id){ activeId = null; showOutput(); }
+        render(); return;
+      }
+      if (it.state === 'done'){ activeId = it.id; render(); showOutput(); }
+    });
+    els.stack.appendChild(el);
+  }
+  const busy = items.some(i => i.state === 'busy');
+  els.convert.disabled = busy || !items.some(i => i.state === 'idle' || i.state === 'error');
+  els.convert.textContent = busy ? '轉換中…' : '轉換';
+  els.zip.disabled = !items.some(i => i.state === 'done');
+}
+
+function current(){ return items.find(i => i.id === activeId && i.state === 'done') || null; }
+
+function showOutput(){
+  const it = current();
+  els.copy.disabled = els.save.disabled = !it;
+  if (!it){
+    els.outname.textContent = '輸出';
+    els.out.innerHTML = '<div class="empty"><b>還沒有內容</b><p>加入檔案後按「轉換」</p></div>';
+    return;
+  }
+  els.outname.textContent = it.result.filename;
+  const text = it.result.markdown;
+  if (!text.trim()){
+    els.out.innerHTML = '<div class="empty"><b>轉出來是空的</b><p>這個檔案沒有可擷取的文字內容</p></div>';
+    return;
+  }
+  if (mode === 'raw' || typeof marked === 'undefined'){
+    els.out.innerHTML = `<pre class="raw">${esc(text)}</pre>`;
+  } else {
+    const div = document.createElement('div');
+    div.className = 'md';
+    div.innerHTML = marked.parse(text, { breaks:true, gfm:true });
+    div.querySelectorAll('script,iframe,object,embed').forEach(n => n.remove());
+    els.out.innerHTML = '';
+    els.out.appendChild(div);
+  }
+  els.out.scrollTop = 0;
+}
+
+/* ---------- actions ---------- */
+async function convertAll(){
+  const pending = items.filter(i => i.state === 'idle' || i.state === 'error');
+  if (!pending.length) return;
+  pending.forEach(i => { i.state = 'busy'; i.result = null; });
+  render();
+
+  const fd = new FormData();
+  pending.forEach(i => fd.append('files', i.file, i.name));
+
+  try {
+    const res = await fetch('/api/convert', { method:'POST', body:fd });
+    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || `HTTP ${res.status}`);
+    const { results } = await res.json();
+    results.forEach((r, idx) => {
+      const it = pending[idx];
+      it.result = r;
+      it.state = r.ok ? 'done' : 'error';
+    });
+    const okItem = pending.find(i => i.state === 'done');
+    if (okItem && !current()) activeId = okItem.id;
+    const failed = pending.filter(i => i.state === 'error').length;
+    toast(failed ? `完成，${failed} 個檔案失敗` : `完成 ${pending.length} 個檔案`, !!failed);
+  } catch (err) {
+    pending.forEach(i => { i.state = 'error'; i.result = { error:String(err.message||err), filename:i.name, markdown:'', chars:0 }; });
+    toast('轉換失敗：' + (err.message || err), true);
+  }
+  render();
+  showOutput();
+}
+
+async function convertUrl(){
+  const url = els.url.value.trim();
+  if (!url) return;
+  const it = { id:++seq, name:url, size:0, url, state:'busy', result:null };
+  items.push(it); render();
+  try {
+    const res = await fetch('/api/convert-url', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ url })
+    });
+    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || `HTTP ${res.status}`);
+    const { results } = await res.json();
+    it.result = results[0]; it.state = 'done'; activeId = it.id;
+    els.url.value = '';
+    toast('已抓取並轉換');
+  } catch (err) {
+    it.state = 'error';
+    it.result = { error:String(err.message||err), filename:'url.md', markdown:'', chars:0 };
+    toast('抓取失敗：' + (err.message || err), true);
+  }
+  render(); showOutput();
+}
+
+async function downloadZip(){
+  const done = items.filter(i => i.state === 'done');
+  if (!done.length) return;
+  const body = { items: done.map(i => ({ filename:i.result.filename, markdown:i.result.markdown })) };
+  const res = await fetch('/api/zip', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  if (!res.ok){ toast('打包失敗', true); return; }
+  saveBlob(await res.blob(), `markdown-${Date.now()}.zip`);
+}
+
+function saveBlob(blob, name){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ---------- wiring ---------- */
+els.drop.addEventListener('click', () => els.picker.click());
+els.drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); els.picker.click(); }});
+els.picker.addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+
+['dragenter','dragover'].forEach(t => els.drop.addEventListener(t, e => { e.preventDefault(); els.drop.classList.add('over'); }));
+['dragleave','drop'].forEach(t => els.drop.addEventListener(t, e => { e.preventDefault(); els.drop.classList.remove('over'); }));
+els.drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
+
+els.convert.addEventListener('click', convertAll);
+els.zip.addEventListener('click', downloadZip);
+els.urlgo.addEventListener('click', convertUrl);
+els.url.addEventListener('keydown', e => { if (e.key === 'Enter') convertUrl(); });
+els.clear.addEventListener('click', () => { items = []; activeId = null; render(); showOutput(); });
+
+els.copy.addEventListener('click', async () => {
+  const it = current(); if (!it) return;
+  try { await navigator.clipboard.writeText(it.result.markdown); toast('已複製 Markdown'); }
+  catch { toast('瀏覽器不允許複製', true); }
+});
+els.save.addEventListener('click', () => {
+  const it = current(); if (!it) return;
+  saveBlob(new Blob([it.result.markdown], { type:'text/markdown;charset=utf-8' }), it.result.filename);
+});
+
+function setMode(next){
+  mode = next;
+  els.tabPreview.setAttribute('aria-pressed', String(next === 'preview'));
+  els.tabRaw.setAttribute('aria-pressed', String(next === 'raw'));
+  showOutput();
+}
+els.tabPreview.addEventListener('click', () => setMode('preview'));
+els.tabRaw.addEventListener('click', () => setMode('raw'));
+
+fetch('/api/formats').then(r => r.json()).then(cfg => {
+  els.limits.textContent = `單檔 ${cfg.max_file_mb} MB · 一次最多 ${cfg.max_files} 個`;
+  els.picker.accept = cfg.extensions.join(',');
+  els.exts.textContent = cfg.extensions.slice(0, 10).map(e => e.slice(1).toUpperCase()).join(' · ') + ' …';
+  if (!cfg.url_fetch) document.querySelector('.urlrow').remove();
+}).catch(() => { els.limits.textContent = '服務連線異常'; });
+
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+services:
+  markitdown-web:
+    build: .
+    image: markitdown-web:1.0.0
+    container_name: markitdown-web
+    restart: unless-stopped
+    ports:
+      - "9444:8443"
+    volumes:
+      - /home/joy/workspaces/certs/cert2026-1:/certs:ro
+    environment:
+      PORT: "8443"
+      CERT_DIR: "/certs"
+      # 憑證檔名不是 fullchain.pem / privkey.pem 時，取消註解並指定
+      # CERT_FILE: "/certs/your-cert.pem"
+      # KEY_FILE:  "/certs/your-key.pem"
+      UVICORN_WORKERS: "2"
+      CONVERT_WORKERS: "8"
+      MAX_FILE_MB: "50"
+      MAX_FILES: "20"
+      ENABLE_URL_FETCH: "1"
+      MARKITDOWN_ENABLE_PLUGINS: "0"
+      TZ: "Asia/Taipei"
+    tmpfs:
+      - /tmp:size=1g
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
