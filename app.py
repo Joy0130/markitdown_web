@@ -17,6 +17,7 @@ import os
 import re
 import tempfile
 import unicodedata
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from markitdown import MarkItDown
+import pymupdf4llm
 
 # --------------------------------------------------------------------------- #
 # 設定
@@ -77,6 +79,11 @@ def safe_stem(name: str) -> str:
     return (stem or "untitled")[:120]
 
 
+def _convert_pdf(tmp_path: str) -> str:
+    """PDF 用 pymupdf4llm：依字型大小/粗體推斷標題階層，輸出結構化 markdown。"""
+    return pymupdf4llm.to_markdown(tmp_path) or ""
+
+
 def _convert_bytes(data: bytes, filename: str) -> str:
     """MarkItDown 依副檔名挑選 converter，因此寫入保留副檔名的暫存檔。"""
     suffix = Path(filename).suffix.lower()
@@ -84,6 +91,8 @@ def _convert_bytes(data: bytes, filename: str) -> str:
         tmp.write(data)
         tmp_path = tmp.name
     try:
+        if suffix == ".pdf":
+            return _convert_pdf(tmp_path)
         return _new_converter().convert(tmp_path).text_content or ""
     finally:
         try:
@@ -93,9 +102,25 @@ def _convert_bytes(data: bytes, filename: str) -> str:
 
 
 def _convert_uri(uri: str) -> tuple[str, str]:
+    stem = safe_stem(Path(uri.split("?")[0]).stem or "url")
+    if uri.split("?")[0].lower().endswith(".pdf"):
+        with urllib.request.urlopen(uri, timeout=30) as resp:
+            data = resp.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"超過單檔上限 {MAX_FILE_MB} MB")
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        try:
+            return stem, _convert_pdf(tmp_path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     md = _new_converter()
     result = md.convert_uri(uri) if hasattr(md, "convert_uri") else md.convert(uri)
-    title = (getattr(result, "title", None) or Path(uri.split("?")[0]).stem or "url")
+    title = (getattr(result, "title", None) or stem)
     return safe_stem(title), (result.text_content or "")
 
 
