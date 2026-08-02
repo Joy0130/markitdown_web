@@ -172,7 +172,7 @@ pre.raw{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.7;white-
       <div class="dropwrap">
         <div class="drop" id="drop" tabindex="0" role="button" aria-label="選擇或拖放檔案">
           <b>拖放檔案，或點擊選擇</b>
-          <small id="exts">PDF · DOCX · PPTX · XLSX · HTML · 圖片 · 音訊</small>
+          <small id="exts">PDF · DOC · DOCX · PPT · PPTX · XLS · XLSX · CSV · TSV · HTML · XML · JSON · TXT</small>
         </div>
         <input type="file" id="picker" multiple hidden>
       </div>
@@ -236,7 +236,7 @@ const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',
 
 let toastTimer;
 function toast(msg, bad=false){
-  els.toast.textContent = msg;
+  els.toast.innerHTML = esc(msg).replace(/\n/g, '<br>');
   els.toast.classList.toggle('bad', bad);
   els.toast.classList.add('show');
   clearTimeout(toastTimer);
@@ -244,8 +244,31 @@ function toast(msg, bad=false){
 }
 
 /* ---------- state ---------- */
+const ALLOWED_EXTS = new Set([
+  '.pdf','.docx','.doc','.pptx','.ppt','.xlsx','.xls','.csv','.tsv',
+  '.html','.htm','.xml','.json','.txt'
+]);
+
+function getFileExt(name) {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
 function addFiles(list){
-  for (const f of list) items.push({ id:++seq, name:f.name, size:f.size, file:f, state:'idle', result:null });
+  const accepted = [];
+  const rejected = [];
+  for (const f of list) {
+    if (ALLOWED_EXTS.has(getFileExt(f.name))) {
+      accepted.push(f);
+    } else {
+      rejected.push(f.name);
+    }
+  }
+  if (rejected.length) {
+    const allowed = [...ALLOWED_EXTS].map(e => e.slice(1).toUpperCase()).join(', ');
+    toast(`不支援的檔案格式：${rejected.join('、')}\n僅接受：${allowed}`, true);
+  }
+  for (const f of accepted) items.push({ id:++seq, name:f.name, size:f.size, file:f, state:'idle', result:null });
   render();
 }
 
@@ -418,7 +441,7 @@ els.tabRaw.addEventListener('click', () => setMode('raw'));
 fetch('/api/formats').then(r => r.json()).then(cfg => {
   els.limits.textContent = `單檔 ${cfg.max_file_mb} MB · 一次最多 ${cfg.max_files} 個`;
   els.picker.accept = cfg.extensions.join(',');
-  els.exts.textContent = cfg.extensions.slice(0, 10).map(e => e.slice(1).toUpperCase()).join(' · ') + ' …';
+  els.exts.textContent = cfg.extensions.map(e => e.slice(1).toUpperCase()).join(' · ');
   if (!cfg.url_fetch) document.querySelector('.urlrow').remove();
 }).catch(() => { els.limits.textContent = '服務連線異常'; });
 

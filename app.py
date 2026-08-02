@@ -49,10 +49,7 @@ ENABLE_URL_FETCH = os.getenv("ENABLE_URL_FETCH", "1") == "1"
 SUPPORTED_EXTENSIONS = sorted(
     {
         ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".csv", ".tsv",
-        ".html", ".htm", ".xml", ".json", ".txt", ".md", ".markdown", ".rst",
-        ".epub", ".msg", ".zip", ".ipynb",
-        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff",
-        ".mp3", ".wav", ".m4a", ".flac",
+        ".html", ".htm", ".xml", ".json", ".txt",
     }
 )
 
@@ -175,6 +172,13 @@ async def convert(files: list[UploadFile] = File(...)) -> JSONResponse:
         source = upload.filename or "untitled"
         stem = safe_stem(source)
         try:
+            ext = Path(source).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                allowed = ", ".join(SUPPORTED_EXTENSIONS)
+                raise ValueError(
+                    f"不支援的檔案格式「{ext or '(無副檔名)'}」，"
+                    f"僅接受：{allowed}"
+                )
             data = await upload.read()
             if not data:
                 raise ValueError("檔案是空的")
