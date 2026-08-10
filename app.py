@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import io
+import ipaddress
 import os
 import re
+import socket
 import tempfile
 import unicodedata
+import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +79,37 @@ def safe_stem(name: str) -> str:
     return (stem or "untitled")[:120]
 
 
+def _validate_url(url: str) -> None:
+    """驗證 URL 不指向內網或保留 IP，防止 SSRF 攻擊。
+
+    解析 DNS 後檢查所有回傳的 IP 位址，只要有任何一個落在
+    私有（private）、迴路（loopback）、鏈路本地（link-local）
+    或其他保留網段，就拒絕存取。
+    """
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("無法從 URL 解析出主機名稱")
+
+    # 阻擋 localhost 相關名稱
+    if hostname.lower() in ("localhost", "localhost."):
+        raise ValueError("不允許存取 localhost")
+
+    try:
+        # getaddrinfo 同時處理 IPv4 / IPv6 及帶 port 的情況
+        addr_infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"DNS 解析失敗：{hostname}") from exc
+
+    for family, _type, _proto, _canonname, sockaddr in addr_infos:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError(
+                f"URL 解析到內部位址 {ip}，基於安全考量已封鎖。"
+                f"只允許存取公開網際網路位址。"
+            )
+
+
 def _convert_pdf(tmp_path: str) -> str:
     """PDF 用 pymupdf4llm：依字型大小/粗體推斷標題階層，輸出結構化 markdown。"""
     return pymupdf4llm.to_markdown(tmp_path) or ""
@@ -99,6 +133,7 @@ def _convert_bytes(data: bytes, filename: str) -> str:
 
 
 def _convert_uri(uri: str) -> tuple[str, str]:
+    _validate_url(uri)
     stem = safe_stem(Path(uri.split("?")[0]).stem or "url")
     if uri.split("?")[0].lower().endswith(".pdf"):
         with urllib.request.urlopen(uri, timeout=30) as resp:

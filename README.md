@@ -32,6 +32,87 @@ entrypoint 會依序尋找 `fullchain.pem` → `cert.pem` → `*.crt`／`privkey
 | GET | `/healthz` | 健康檢查 |
 | GET | `/api/docs` | OpenAPI |
 
+## 文件處理流程
+
+使用者透過網頁上傳的檔案，全程在容器內部完成處理，**不會傳送到任何外部伺服器**。
+
+### 處理生命週期
+
+```
+使用者上傳 ──→ FastAPI 接收到記憶體 ──→ 寫入 /tmp 暫存檔（tmpfs · RAM）
+                                              │
+                                              ▼
+                                    MarkItDown / pymupdf4llm
+                                        本地轉換
+                                              │
+                                              ▼
+                                    os.unlink() 立即刪除暫存檔
+                                              │
+                                              ▼
+                                    回傳 Markdown 純文字給前端
+```
+
+### 各階段詳細說明
+
+| 階段 | 位置 | 說明 |
+| --- | --- | --- |
+| 上傳接收 | FastAPI `UploadFile` | 檔案以 multipart 形式送到 `POST /api/convert`，讀入記憶體 (`await upload.read()`) |
+| 暫存寫入 | Container `/tmp` | `tempfile.NamedTemporaryFile(suffix=...)` 寫入帶原始副檔名的暫存檔，供轉換器辨識格式 |
+| 格式轉換 | 本地函式庫 | PDF 使用 `pymupdf4llm`；其餘格式使用 `MarkItDown`。兩者皆為離線運算，不連線外部服務 |
+| 暫存刪除 | `finally` 區塊 | 無論成功或失敗，`os.unlink(tmp_path)` 在 `finally` 中執行，確保暫存檔被刪除 |
+| 結果回傳 | JSON Response | 純文字 Markdown 透過 HTTPS 回傳前端，前端在瀏覽器記憶體中呈現 |
+
+### 資料安全性
+
+- **不寫入磁碟** — `/tmp` 掛載為 `tmpfs`（`docker-compose.yml` 中 `tmpfs: /tmp:size=1g`），資料僅存在記憶體
+- **不持久化** — 轉換完成後立即刪除暫存檔；即使未刪成功，容器重啟後 tmpfs 也會清空
+- **無資料庫** — 沒有任何資料庫或持久儲存用來保存上傳內容或轉換結果
+- **無外部呼叫** — `markitdown` 與 `pymupdf4llm` 皆為離線函式庫，不含遙測或雲端通訊
+- **插件已關閉** — `MARKITDOWN_ENABLE_PLUGINS=0`，不會載入可能有網路行為的第三方插件
+- **非 root 執行** — 容器以 `appuser`（uid 10001）執行，降低安全風險
+- **HTTPS 加密** — 透過 TLS 憑證加密傳輸，防止中間人攔截
+- **無 Volume 掛出** — 唯一的 volume 是 `/certs:ro`（唯讀憑證），沒有將 `/tmp` 或其他目錄掛載到宿主機
+
+> **結論：上傳的文件只在容器記憶體中短暫存在（轉換期間），轉換完即刪除，不留任何痕跡，不會外流。**
+
+### URL 抓取功能與 SSRF 防護
+
+網頁提供「貼上 URL 直接轉換」的功能（由 `ENABLE_URL_FETCH` 控制）。此功能的 HTTP 請求是**由伺服器端（VM）發起**，而非使用者的瀏覽器。
+
+#### 為什麼需要防護？
+
+因為 VM 本身位於公司內網中，可存取到其他內部伺服器、資料庫管理介面、監控系統等。如果不加驗證，任何使用網頁的人都可以透過此功能，間接「借用」VM 的網路身份存取不該碰的內部資源——這就是 **SSRF（Server-Side Request Forgery，伺服器端請求偽造）** 攻擊。
+
+```
+使用者的電腦                        公司 Linux VM（markitdown-web）
+     │                                       │
+     │  輸入: http://192.168.1.100/機密文件     │
+     │ ────────────────────────────────────→  │
+     │                                       │── VM 用自己的身份去存取 192.168.1.100
+     │                                       │  （VM 在內網中，所以連得到）
+     │       ← 回傳內容給使用者 ────────────────│
+```
+
+#### 防護機制
+
+`app.py` 中的 `_validate_url()` 在 URL 被實際請求**之前**，先透過 DNS 解析取得目標 IP，再驗證該 IP 是否為內網或保留位址。即使攻擊者使用自訂域名（如 `http://my-trick.com`）但 DNS 指向內網 IP，也一樣會被擋下。
+
+#### 封鎖範圍
+
+| 使用者輸入的 URL | 結果 | 原因 |
+| --- | --- | --- |
+| `http://192.168.x.x/...` | ❌ 封鎖 | 私有 IP（`is_private`） |
+| `http://10.0.0.x/...` | ❌ 封鎖 | 私有 IP（`is_private`） |
+| `http://172.16.x.x/...` | ❌ 封鎖 | 私有 IP（`is_private`） |
+| `http://localhost/...` | ❌ 封鎖 | 迴路位址（`is_loopback`） |
+| `http://169.254.x.x/...` | ❌ 封鎖 | 鏈路本地（`is_link_local`） |
+| `http://intranet.company.local/...` | ❌ 封鎖 | DNS 解析後 IP 仍為內網位址 |
+| `https://www.google.com` | ✅ 允許 | 公開 IP |
+| `https://zh.wikipedia.org/...` | ✅ 允許 | 公開 IP |
+
+> 若需完全禁止出站流量，可在 `docker-compose.yml` 設定 `ENABLE_URL_FETCH: "0"` 關閉整個 URL 抓取功能。
+
+
 # MCP 部署設定
 
 
