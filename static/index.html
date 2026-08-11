@@ -42,10 +42,11 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
 .col{display:flex;flex-direction:column;min-height:0;min-width:0}
 .col.left{border-right:1px solid var(--line);background:var(--panel)}
 .colhead{
-  display:flex;align-items:center;gap:10px;padding:10px 16px;
+  display:flex;align-items:center;gap:10px;padding:10px 16px;flex-wrap:wrap;
   border-bottom:1px solid var(--line);font-family:var(--mono);
   font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)
 }
+.colhead-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .colhead .spacer{flex:1}
 
 /* ---------- drop ---------- */
@@ -97,7 +98,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
 }
 @keyframes scan{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
 
-.actions{display:flex;gap:8px;padding:14px 16px;border-top:1px solid var(--line)}
+.actions{display:flex;gap:8px;padding:14px 16px;border-top:1px solid var(--line);flex-wrap:wrap}
 .btn{
   flex:1;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
   border-radius:var(--r);padding:9px 12px;cursor:pointer;font-family:var(--mono);
@@ -150,6 +151,9 @@ pre.raw{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.7;white-
   main{grid-template-columns:1fr;grid-template-rows:auto 1fr}
   .col.left{border-right:0;border-bottom:1px solid var(--line)}
   .stack{max-height:34dvh}
+  .colhead{gap:8px;padding:8px 12px}
+  .colhead-actions{flex-wrap:wrap;gap:4px}
+  .actions .btn{min-width:0}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
@@ -195,12 +199,14 @@ pre.raw{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.7;white-
       <div class="colhead">
         <span id="outname">輸出</span>
         <span class="spacer"></span>
-        <div class="tabs">
-          <button class="tab" id="tab-preview" aria-pressed="true">預覽</button>
-          <button class="tab" id="tab-raw" aria-pressed="false">原始碼</button>
+        <div class="colhead-actions">
+          <div class="tabs">
+            <button class="tab" id="tab-preview" aria-pressed="true">預覽</button>
+            <button class="tab" id="tab-raw" aria-pressed="false">原始碼</button>
+          </div>
+          <button class="btn icon" id="copy" disabled>複製</button>
+          <button class="btn icon" id="save" disabled>下載 .md</button>
         </div>
-        <button class="btn icon" id="copy" disabled>複製</button>
-        <button class="btn icon" id="save" disabled>下載 .md</button>
       </div>
       <div class="out" id="out">
         <div class="empty">
