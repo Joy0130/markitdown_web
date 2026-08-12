@@ -12,15 +12,16 @@ Endpoints
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import ipaddress
 import os
 import re
 import socket
+import ssl
 import tempfile
 import unicodedata
 import urllib.parse
-import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -79,35 +80,148 @@ def safe_stem(name: str) -> str:
     return (stem or "untitled")[:120]
 
 
-def _validate_url(url: str) -> None:
-    """驗證 URL 不指向內網或保留 IP，防止 SSRF 攻擊。
+MAX_REDIRECTS = 5
+FETCH_TIMEOUT = int(os.getenv("URL_FETCH_TIMEOUT", "30"))
 
-    解析 DNS 後檢查所有回傳的 IP 位址，只要有任何一個落在
-    私有（private）、迴路（loopback）、鏈路本地（link-local）
-    或其他保留網段，就拒絕存取。
+# Content-Type → 副檔名，抓回來的內容沒有可用副檔名時據此判斷 converter
+_CONTENT_TYPE_EXT = {
+    "application/pdf": ".pdf",
+    "text/html": ".html",
+    "application/xhtml+xml": ".html",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+    "application/json": ".json",
+    "text/xml": ".xml",
+    "application/xml": ".xml",
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+}
+
+
+def _check_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    """只要落在非公開網段就拒絕。"""
+    # ::ffff:127.0.0.1 這類 IPv4-mapped 位址要拆出內層再判斷
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise ValueError(
+            f"URL 解析到內部位址 {ip}，基於安全考量已封鎖。"
+            f"只允許存取公開網際網路位址。"
+        )
+
+
+def _resolve_and_validate(url: str) -> tuple[urllib.parse.ParseResult, list[str], int]:
+    """解析 URL、驗證所有 DNS 結果，並回傳可實際連線的 IP 清單。
+
+    關鍵：DNS 只解析這一次，之後直接連線到這裡回傳的 IP，
+    請求階段不再做第二次解析，因此無法用 DNS Rebinding 繞過檢查。
     """
     parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("只接受 http:// 或 https:// 開頭的網址")
+
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("無法從 URL 解析出主機名稱")
-
-    # 阻擋 localhost 相關名稱
-    if hostname.lower() in ("localhost", "localhost."):
+    if hostname.lower().rstrip(".") == "localhost":
         raise ValueError("不允許存取 localhost")
 
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
     try:
-        # getaddrinfo 同時處理 IPv4 / IPv6 及帶 port 的情況
-        addr_infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        addr_infos = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise ValueError(f"DNS 解析失敗：{hostname}") from exc
+    if not addr_infos:
+        raise ValueError(f"DNS 解析失敗：{hostname}")
 
-    for family, _type, _proto, _canonname, sockaddr in addr_infos:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise ValueError(
-                f"URL 解析到內部位址 {ip}，基於安全考量已封鎖。"
-                f"只允許存取公開網際網路位址。"
-            )
+    # 全部檢查過才放行，避免「有一筆是內網」的混合回應
+    ips: list[str] = []
+    for _family, _type, _proto, _canonname, sockaddr in addr_infos:
+        _check_ip(ipaddress.ip_address(sockaddr[0]))
+        if sockaddr[0] not in ips:
+            ips.append(sockaddr[0])
+
+    return parsed, ips, port
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """連線到已驗證過的 IP，但 Host 標頭仍用原主機名稱。"""
+
+    def __init__(self, host: str, ips: list[str], port: int, timeout: int) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self._pinned_ips = ips
+
+    def connect(self) -> None:  # pragma: no cover - 交由 socket 層處理
+        last: Exception | None = None
+        for ip in self._pinned_ips:  # 依序嘗試，避開不可達的 IPv6/IPv4
+            try:
+                self.sock = socket.create_connection((ip, self.port), self.timeout)
+                return
+            except OSError as exc:
+                last = exc
+        raise last or OSError("無法建立連線")
+
+
+class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    """同上，並以原主機名稱做 SNI 與憑證驗證。"""
+
+    default_port = 443
+
+    def connect(self) -> None:  # pragma: no cover - 交由 socket 層處理
+        super().connect()
+        context = ssl.create_default_context()
+        self.sock = context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _fetch_once(url: str, max_bytes: int) -> tuple[int, dict[str, str], bytes]:
+    """對單一 URL 發出一次 GET（不跟隨轉址），連線鎖定在已驗證的 IP 上。"""
+    parsed, ips, port = _resolve_and_validate(url)
+    conn_cls = _PinnedHTTPSConnection if parsed.scheme == "https" else _PinnedHTTPConnection
+    conn = conn_cls(parsed.hostname, ips, port, FETCH_TIMEOUT)
+    try:
+        path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+        conn.request("GET", path, headers={"Host": parsed.netloc, "Accept": "*/*"})
+        resp = conn.getresponse()
+        headers = {k.lower(): v for k, v in resp.getheaders()}
+        body = b"" if 300 <= resp.status < 400 else resp.read(max_bytes + 1)
+        return resp.status, headers, body
+    finally:
+        conn.close()
+
+
+def _safe_fetch(url: str, max_bytes: int) -> tuple[str, str, bytes]:
+    """安全抓取 URL 內容，回傳 (最終網址, content-type, 內容)。
+
+    每一次轉址都會重新走一遍 `_resolve_and_validate`，
+    所以攻擊者無法用 302 轉址把請求導到內網。
+    """
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        status, headers, body = _fetch_once(current, max_bytes)
+        if 300 <= status < 400 and headers.get("location"):
+            current = urllib.parse.urljoin(current, headers["location"])
+            continue
+        if status >= 400:
+            raise ValueError(f"下載失敗，HTTP {status}")
+        if len(body) > max_bytes:
+            raise ValueError(f"超過單檔上限 {MAX_FILE_MB} MB")
+        content_type = headers.get("content-type", "").split(";")[0].strip().lower()
+        return current, content_type, body
+    raise ValueError(f"轉址次數超過上限（{MAX_REDIRECTS} 次）")
 
 
 def _convert_pdf(tmp_path: str) -> str:
@@ -115,16 +229,16 @@ def _convert_pdf(tmp_path: str) -> str:
     return pymupdf4llm.to_markdown(tmp_path) or ""
 
 
-def _convert_bytes(data: bytes, filename: str) -> str:
+def _convert_with_suffix(data: bytes, suffix: str) -> tuple[str | None, str]:
     """MarkItDown 依副檔名挑選 converter，因此寫入保留副檔名的暫存檔。"""
-    suffix = Path(filename).suffix.lower()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
     try:
         if suffix == ".pdf":
-            return _convert_pdf(tmp_path)
-        return _new_converter().convert(tmp_path).text_content or ""
+            return None, _convert_pdf(tmp_path)
+        result = _new_converter().convert(tmp_path)
+        return getattr(result, "title", None), (result.text_content or "")
     finally:
         try:
             os.unlink(tmp_path)
@@ -132,28 +246,24 @@ def _convert_bytes(data: bytes, filename: str) -> str:
             pass
 
 
+def _convert_bytes(data: bytes, filename: str) -> str:
+    return _convert_with_suffix(data, Path(filename).suffix.lower())[1]
+
+
 def _convert_uri(uri: str) -> tuple[str, str]:
-    _validate_url(uri)
-    stem = safe_stem(Path(uri.split("?")[0]).stem or "url")
-    if uri.split("?")[0].lower().endswith(".pdf"):
-        with urllib.request.urlopen(uri, timeout=30) as resp:
-            data = resp.read(MAX_FILE_BYTES + 1)
-        if len(data) > MAX_FILE_BYTES:
-            raise ValueError(f"超過單檔上限 {MAX_FILE_MB} MB")
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(data)
-            tmp_path = tmp.name
-        try:
-            return stem, _convert_pdf(tmp_path)
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-    md = _new_converter()
-    result = md.convert_uri(uri) if hasattr(md, "convert_uri") else md.convert(uri)
-    title = (getattr(result, "title", None) or stem)
-    return safe_stem(title), (result.text_content or "")
+    """先用鎖定 IP 的方式把內容抓下來，再本地轉換；轉換器不會自己連網。"""
+    final_url, content_type, data = _safe_fetch(uri, MAX_FILE_BYTES)
+    if not data:
+        raise ValueError("下載到的內容是空的")
+
+    path = urllib.parse.urlparse(final_url).path
+    stem = safe_stem(Path(path).stem or "url")
+    suffix = Path(path).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        suffix = _CONTENT_TYPE_EXT.get(content_type, ".html")
+
+    title, text = _convert_with_suffix(data, suffix)
+    return safe_stem(title or stem), text
 
 
 async def _run(fn, *args) -> Any:
