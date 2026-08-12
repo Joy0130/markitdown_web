@@ -84,6 +84,21 @@ def safe_stem(name: str) -> str:
 MAX_REDIRECTS = 5
 FETCH_TIMEOUT = int(os.getenv("URL_FETCH_TIMEOUT", "30"))
 
+# 不少站台（Cloudflare 等）會直接 403 掉沒有 User-Agent 的請求，
+# 因此送出一組一般瀏覽器的標頭。Accept-Encoding 固定 identity，
+# 我們沒有解壓縮邏輯，不能讓對方回 gzip。
+USER_AGENT = os.getenv(
+    "URL_FETCH_USER_AGENT",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+)
+_FETCH_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "identity",
+}
+
 # Content-Type → 副檔名，抓回來的內容沒有可用副檔名時據此判斷 converter
 _CONTENT_TYPE_EXT = {
     "application/pdf": ".pdf",
@@ -195,7 +210,7 @@ def _fetch_once(url: str, max_bytes: int) -> tuple[int, dict[str, str], bytes]:
     conn = conn_cls(parsed.hostname, ips, port, FETCH_TIMEOUT)
     try:
         path = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
-        conn.request("GET", path, headers={"Host": parsed.netloc, "Accept": "*/*"})
+        conn.request("GET", path, headers={"Host": parsed.netloc, **_FETCH_HEADERS})
         resp = conn.getresponse()
         headers = {k.lower(): v for k, v in resp.getheaders()}
         body = b"" if 300 <= resp.status < 400 else resp.read(max_bytes + 1)
@@ -217,7 +232,8 @@ def _safe_fetch(url: str, max_bytes: int) -> tuple[str, str, bytes]:
             current = urllib.parse.urljoin(current, headers["location"])
             continue
         if status >= 400:
-            raise ValueError(f"下載失敗，HTTP {status}")
+            hint = "（來源站台拒絕存取，可能有反爬蟲或登入限制）" if status in (401, 403, 429) else ""
+            raise ValueError(f"下載失敗，HTTP {status}{hint}")
         if len(body) > max_bytes:
             raise ValueError(f"超過單檔上限 {MAX_FILE_MB} MB")
         content_type = headers.get("content-type", "").split(";")[0].strip().lower()
