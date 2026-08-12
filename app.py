@@ -15,6 +15,7 @@ import asyncio
 import http.client
 import io
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -229,8 +230,23 @@ def _convert_pdf(tmp_path: str) -> str:
     return pymupdf4llm.to_markdown(tmp_path) or ""
 
 
+def _convert_json(data: bytes) -> str:
+    """MarkItDown 把 JSON 當純文字原封輸出，這裡改成 pretty-print 後包 code fence。"""
+    text = data.decode("utf-8-sig", errors="replace")
+    try:
+        text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+    except ValueError:
+        text = text.strip()  # 不是合法 JSON 就照原文包起來
+    # 內容本身含有 ``` 時，外層 fence 要比它更長才不會提前結束
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}json\n{text}\n{fence}"
+
+
 def _convert_with_suffix(data: bytes, suffix: str) -> tuple[str | None, str]:
     """MarkItDown 依副檔名挑選 converter，因此寫入保留副檔名的暫存檔。"""
+    if suffix == ".json":
+        return None, _convert_json(data)
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
