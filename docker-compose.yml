@@ -5,6 +5,7 @@ services:
     container_name: markitdown-web
     restart: unless-stopped
     ports:
+      # 有可用憑證時使用 HTTPS；找不到憑證時使用 HTTP，連接埠不變
       - "9444:8443"
     volumes:
       - /home/joy/workspaces/certs/cert2026-1:/certs:ro

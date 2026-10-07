@@ -9,10 +9,10 @@ scp -r markitdown-web joy@joylinux:~/workspaces/
 ssh joy@joylinux
 cd ~/workspaces/markitdown-web
 docker compose up -d --build
-docker compose logs -f          # 確認 [boot] HTTPS 那行有讀到憑證
+docker compose logs -f          # 確認服務使用 HTTPS 或 HTTP
 ```
 
-開啟 `https://joylinux.futsu.com.tw:9444/`
+有可用憑證時開啟 `https://joylinux.futsu.com.tw:9444/`；找不到憑證時改用 `http://joylinux.futsu.com.tw:9444/`。
 
 ## 憑證
 
@@ -70,7 +70,7 @@ entrypoint 會依序尋找 `fullchain.pem` → `cert.pem` → `*.crt`／`privkey
 - **無外部呼叫** — `markitdown` 與 `pymupdf4llm` 皆為離線函式庫，不含遙測或雲端通訊
 - **插件已關閉** — `MARKITDOWN_ENABLE_PLUGINS=0`，不會載入可能有網路行為的第三方插件
 - **非 root 執行** — 容器以 `appuser`（uid 10001）執行，降低安全風險
-- **HTTPS 加密** — 透過 TLS 憑證加密傳輸，防止中間人攔截
+- **傳輸加密** — 有可用 TLS 憑證時使用 HTTPS；無憑證時使用 HTTP，傳輸內容不會加密
 - **無 Volume 掛出** — 唯一的 volume 是 `/certs:ro`（唯讀憑證），沒有將 `/tmp` 或其他目錄掛載到宿主機
 
 > **結論：上傳的文件只在容器記憶體中短暫存在（轉換期間），轉換完即刪除，不留任何痕跡，不會外流。**
