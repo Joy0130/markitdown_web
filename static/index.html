@@ -8,14 +8,38 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
+<script>
+// 先套用記住的主題，避免載入時閃一下
+try{const t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}
+</script>
 <style>
 :root{
   --ink:#0E1116; --panel:#151A21; --panel-2:#1A212A; --line:#242D3A;
   --text:#DCE3EC; --muted:#7A879A; --accent:#58C7F3; --amber:#F2B45A; --red:#F2726F;
+  --accent-hover:#7BD5F7; --on-accent:#07131A; --line-strong:#3C4A5E; --hover:#1F2833;
+  --drop-over:#182430; --selected:#16232e; --placeholder:#55606f; --scan:rgba(88,199,243,.16);
+  color-scheme:dark;
   --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   --display:"Space Grotesk",system-ui,sans-serif;
   --sans:system-ui,-apple-system,"Noto Sans TC",sans-serif;
   --r:6px;
+}
+/* 明亮模式：沿用同一組色相，換成淺底深字 */
+:root[data-theme="light"]{
+  --ink:#F3F5F8; --panel:#FFFFFF; --panel-2:#EEF2F6; --line:#D6DDE6;
+  --text:#18202B; --muted:#5D6A7C; --accent:#0679AB; --amber:#A8650F; --red:#C8383A;
+  --accent-hover:#0A8BC2; --on-accent:#FFFFFF; --line-strong:#AEBACA; --hover:#E4E9EF;
+  --drop-over:#E4F3FA; --selected:#E1F1F9; --placeholder:#8A96A6; --scan:rgba(6,121,171,.12);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme]){
+    --ink:#F3F5F8; --panel:#FFFFFF; --panel-2:#EEF2F6; --line:#D6DDE6;
+    --text:#18202B; --muted:#5D6A7C; --accent:#0679AB; --amber:#A8650F; --red:#C8383A;
+    --accent-hover:#0A8BC2; --on-accent:#FFFFFF; --line-strong:#AEBACA; --hover:#E4E9EF;
+    --drop-over:#E4F3FA; --selected:#E1F1F9; --placeholder:#8A96A6; --scan:rgba(6,121,171,.12);
+    color-scheme:light;
+  }
 }
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -55,7 +79,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
   border:1px dashed var(--line);border-radius:var(--r);padding:26px 18px;text-align:center;
   cursor:pointer;transition:border-color .15s,background .15s;background:var(--panel-2)
 }
-.drop:hover,.drop.over{border-color:var(--accent);background:#182430}
+.drop:hover,.drop.over{border-color:var(--accent);background:var(--drop-over)}
 .drop b{display:block;font-family:var(--display);font-size:15px;margin-bottom:4px}
 .drop small{color:var(--muted);font-family:var(--mono);font-size:11px}
 
@@ -64,7 +88,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
   flex:1;min-width:0;background:var(--panel-2);border:1px solid var(--line);
   border-radius:var(--r);padding:8px 10px;font-family:var(--mono);font-size:12px
 }
-.urlrow input::placeholder{color:#55606f}
+.urlrow input::placeholder{color:var(--placeholder)}
 
 /* ---------- file stack ---------- */
 .stack{flex:1;overflow:auto;padding:0 16px 16px;display:flex;flex-direction:column;gap:6px}
@@ -73,8 +97,8 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
   background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);
   padding:9px 10px;cursor:pointer;transition:border-color .15s
 }
-.slab:hover{border-color:#39485c}
-.slab[aria-selected="true"]{border-color:var(--accent);background:#16232e}
+.slab:hover{border-color:var(--line-strong)}
+.slab[aria-selected="true"]{border-color:var(--accent);background:var(--selected)}
 .ext{
   flex:none;width:46px;text-align:center;font-family:var(--mono);font-weight:700;
   font-size:10px;letter-spacing:.06em;color:var(--accent);
@@ -93,7 +117,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
 /* 轉換中的掃描線 — 頁面的簽名動態 */
 .slab.busy::after{
   content:"";position:absolute;inset:0;pointer-events:none;
-  background:linear-gradient(90deg,transparent,rgba(88,199,243,.16),transparent);
+  background:linear-gradient(90deg,transparent,var(--scan),transparent);
   animation:scan 1.05s linear infinite
 }
 @keyframes scan{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
@@ -104,11 +128,12 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;min-heigh
   border-radius:var(--r);padding:9px 12px;cursor:pointer;font-family:var(--mono);
   font-size:12px;letter-spacing:.03em;transition:background .15s,border-color .15s
 }
-.btn:hover:not(:disabled){border-color:#3C4A5E;background:#1F2833}
+.btn:hover:not(:disabled){border-color:var(--line-strong);background:var(--hover)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#07131A;font-weight:700}
-.btn.primary:hover:not(:disabled){background:#7BD5F7;border-color:#7BD5F7}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:700}
+.btn.primary:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover)}
 .btn.icon{flex:none;padding:6px 10px}
+.theme-toggle{align-self:center;font-size:13px;line-height:1}
 
 /* ---------- output ---------- */
 .tabs{display:flex;gap:2px}
@@ -167,6 +192,7 @@ pre.raw{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.7;white-
     <div class="tag">文件 → Markdown</div>
     <div class="spacer"></div>
     <div class="limits" id="limits">載入中…</div>
+    <button class="btn icon theme-toggle" id="theme" type="button"></button>
   </header>
 
   <main>
@@ -228,6 +254,25 @@ const els = {
   limits:$('#limits'), exts:$('#exts'), url:$('#url'), urlgo:$('#urlgo'),
   tabPreview:$('#tab-preview'), tabRaw:$('#tab-raw'),
 };
+
+/* ---------- theme ---------- */
+const themeBtn = $('#theme');
+const currentTheme = () => document.documentElement.dataset.theme
+  || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+const paintThemeBtn = () => {
+  const light = currentTheme() === 'light';
+  themeBtn.textContent = light ? '☾' : '☀';
+  themeBtn.title = light ? '切換到黑暗模式' : '切換到明亮模式';
+  themeBtn.setAttribute('aria-label', themeBtn.title);
+};
+themeBtn.addEventListener('click', () => {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('theme', next); } catch (e) {}
+  paintThemeBtn();
+});
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', paintThemeBtn);
+paintThemeBtn();
 
 let items = [];          // {id, name, size, file?, url?, state, result}
 let activeId = null;
