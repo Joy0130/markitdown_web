@@ -34,6 +34,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from lxml import etree
 from markitdown import MarkItDown
 import pymupdf4llm
 
@@ -246,6 +247,133 @@ def _convert_pdf(tmp_path: str) -> str:
     return pymupdf4llm.to_markdown(tmp_path) or ""
 
 
+_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_WQ = f"{{{_W}}}"
+_XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+_ARTICLE_RE = re.compile(r"^第\s*[一二三四五六七八九十百千零〇\d]+\s*([章條节節])")
+_DOCX_STYLE_MAP = "\n".join(
+    f"p[style-name='MdHeading{n}'] => h{n}:fresh" for n in (1, 2, 3)
+)
+
+
+def _docx_style_sizes(styles: etree._Element) -> tuple[dict[str, str], dict[str, int | None], int]:
+    """回傳 (styleId→名稱, styleId→字級[半點，沿 basedOn 繼承], 預設字級)。"""
+    default = styles.find(f"{_WQ}docDefaults/{_WQ}rPrDefault/{_WQ}rPr/{_WQ}sz")
+    default_sz = int(default.get(f"{_WQ}val")) if default is not None else 20
+    names: dict[str, str] = {}
+    own: dict[str, int | None] = {}
+    parent: dict[str, str] = {}
+    for st in styles.iter(f"{_WQ}style"):
+        sid = st.get(f"{_WQ}styleId")
+        name = st.find(f"{_WQ}name")
+        names[sid] = (name.get(f"{_WQ}val") if name is not None else "").lower()
+        sz = st.find(f"{_WQ}rPr/{_WQ}sz")
+        own[sid] = int(sz.get(f"{_WQ}val")) if sz is not None else None
+        based = st.find(f"{_WQ}basedOn")
+        if based is not None:
+            parent[sid] = based.get(f"{_WQ}val")
+
+    def resolve(sid: str, depth: int = 0) -> int | None:
+        if sid not in own or depth > 20:
+            return None
+        if own[sid] is not None:
+            return own[sid]
+        return resolve(parent[sid], depth + 1) if sid in parent else None
+
+    return names, {sid: resolve(sid) for sid in own}, default_sz
+
+
+def _infer_docx_headings(data: bytes) -> tuple[bytes, str | None]:
+    """很多 Word 檔的標題只是「放大字」而非套用標題樣式，mammoth 因此全當成內文。
+    這裡依字級 / 粗體 / 「第 X 條」等線索推斷標題，套上自訂樣式再交給 MarkItDown。
+    文件本身已有標題樣式時不動它。"""
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        doc = etree.fromstring(zin.read("word/document.xml"), _XML_PARSER)
+        styles = etree.fromstring(zin.read("word/styles.xml"), _XML_PARSER)
+        names, style_sz, default_sz = _docx_style_sizes(styles)
+        normal = next((sid for sid, n in names.items() if n == "normal"), None)
+        base_sz = style_sz.get(normal) or default_sz if normal else default_sz
+
+        body = doc.find(f"{_WQ}body")
+        paras = []
+        for p in body.iterfind(f"{_WQ}p"):  # 只看本文段落，表格內不處理
+            ps = p.find(f"{_WQ}pPr/{_WQ}pStyle")
+            sid = ps.get(f"{_WQ}val") if ps is not None else normal
+            if names.get(sid, "").startswith(("heading", "title")):
+                return data, None  # 已有真正的標題樣式
+            p_sz = style_sz.get(sid) or base_sz
+            runs = []
+            for r in p.iter(f"{_WQ}r"):
+                text = "".join(t.text or "" for t in r.iter(f"{_WQ}t"))
+                if not text.strip():
+                    continue
+                sz = r.find(f"{_WQ}rPr/{_WQ}sz")
+                b = r.find(f"{_WQ}rPr/{_WQ}b")
+                bold = b is not None and b.get(f"{_WQ}val", "1") not in ("0", "false")
+                runs.append((text, int(sz.get(f"{_WQ}val")) if sz is not None else p_sz, bold))
+            if runs:
+                paras.append((p, runs))
+
+        if not paras:
+            return data, None
+        # 內文字級 = 以字數加權的眾數
+        weight: dict[int, int] = {}
+        for _, runs in paras:
+            for text, sz, _ in runs:
+                weight[sz] = weight.get(sz, 0) + len(text.strip())
+        body_sz = max(weight, key=weight.get)
+        has_chapter = any(
+            (m := _ARTICLE_RE.match("".join(t for t, _, _ in runs).strip())) and m.group(1) == "章"
+            for _, runs in paras
+        )
+
+        marked = 0
+        for p, runs in paras:
+            text = "".join(t for t, _, _ in runs).strip()
+            if len(text) > 80 or p.find(f"{_WQ}pPr/{_WQ}numPr") is not None:
+                continue
+            max_sz = max(sz for _, sz, _ in runs)
+            all_bold = all(b for _, _, b in runs)
+            level = None
+            if max_sz >= body_sz * 1.5:
+                level = 1
+            elif max_sz >= body_sz * 1.2 and all_bold:  # 只放大不加粗常是簽名欄等表單欄位
+                level = 2
+            elif m := _ARTICLE_RE.match(text):
+                level = 2 if m.group(1) == "章" or not has_chapter else 3
+            elif all_bold and len(text) <= 30 and not text.endswith(("。", "，", "；")):
+                level = 3
+            if level is None:
+                continue
+            ppr = p.find(f"{_WQ}pPr")
+            if ppr is None:
+                ppr = etree.SubElement(p, f"{_WQ}pPr")
+                p.insert(0, ppr)
+            ps = ppr.find(f"{_WQ}pStyle")
+            if ps is None:
+                ps = etree.Element(f"{_WQ}pStyle")
+                ppr.insert(0, ps)
+            ps.set(f"{_WQ}val", f"MdHeading{level}")
+            marked += 1
+
+        if not marked:
+            return data, None
+        for n in (1, 2, 3):
+            st = etree.SubElement(styles, f"{_WQ}style", {f"{_WQ}type": "paragraph", f"{_WQ}styleId": f"MdHeading{n}"})
+            etree.SubElement(st, f"{_WQ}name", {f"{_WQ}val": f"MdHeading{n}"})
+
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename == "word/document.xml":
+                    zout.writestr(item, etree.tostring(doc, xml_declaration=True, encoding="UTF-8", standalone=True))
+                elif item.filename == "word/styles.xml":
+                    zout.writestr(item, etree.tostring(styles, xml_declaration=True, encoding="UTF-8", standalone=True))
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+    return out.getvalue(), _DOCX_STYLE_MAP
+
+
 def _convert_json(data: bytes) -> str:
     """MarkItDown 把 JSON 當純文字原封輸出，這裡改成 pretty-print 後包 code fence。"""
     text = data.decode("utf-8-sig", errors="replace")
@@ -263,13 +391,21 @@ def _convert_with_suffix(data: bytes, suffix: str) -> tuple[str | None, str]:
     """MarkItDown 依副檔名挑選 converter，因此寫入保留副檔名的暫存檔。"""
     if suffix == ".json":
         return None, _convert_json(data)
+    kwargs: dict[str, Any] = {}
+    if suffix == ".docx":
+        try:
+            data, style_map = _infer_docx_headings(data)
+        except (KeyError, zipfile.BadZipFile, etree.XMLSyntaxError, ValueError):
+            style_map = None  # 推斷失敗就照原檔轉
+        if style_map:
+            kwargs["style_map"] = style_map
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
     try:
         if suffix == ".pdf":
             return None, _convert_pdf(tmp_path)
-        result = _new_converter().convert(tmp_path)
+        result = _new_converter().convert(tmp_path, **kwargs)
         return getattr(result, "title", None), (result.text_content or "")
     finally:
         try:
